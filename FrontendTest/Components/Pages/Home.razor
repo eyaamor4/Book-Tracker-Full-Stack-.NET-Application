@@ -1,0 +1,471 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject BookApiClient Api
+@inject IJSRuntime JS
+
+<PageTitle>Book Tracker</PageTitle>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="mb-0">Books</h1>
+    <div class="d-flex gap-2">
+        <button class="btn btn-danger" disabled="@(selectedIds.Count == 0)" @onclick="AskDelete">
+            Delete (@selectedIds.Count)
+        </button>
+        <button class="btn btn-primary" @onclick="OpenCreate">+ New book</button>
+    </div>
+</div>
+
+@* Success message *@
+@if (!string.IsNullOrEmpty(message))
+{
+    <div class="alert alert-success d-flex justify-content-between">
+        <span>@message</span>
+        <button class="btn-close" @onclick="() => message = null"></button>
+    </div>
+}
+
+@* Error message (e.g. refused deletion) *@
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="alert alert-danger d-flex justify-content-between">
+        <span style="white-space: pre-line;">@errorMessage</span>
+        <button class="btn-close" @onclick="() => errorMessage = null"></button>
+    </div>
+}
+
+<div class="mb-3">
+    <input class="form-control" placeholder="Search by title or author..."
+           value="@search" @oninput="OnSearchInput" />
+</div>
+
+@if (books is not null)
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th style="width:40px"></th>
+                <th>Title</th>
+                <th>Author</th>
+                <th>Release Date</th>
+                <th>Genre</th>
+                <th>Notes</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var book in books)
+            {
+                <tr>
+                    <td>
+                        <input type="checkbox" class="form-check-input"
+                               checked="@selectedIds.Contains(book.Id)"
+                               @onchange="e => ToggleSelect(book.Id, (bool)e.Value!)" />
+                    </td>
+                    <td>
+                        <button class="btn btn-link p-0" @onclick="() => OpenEdit(book)">@book.Title</button>
+                    </td>
+                    <td class="text-cell" title="@book.Author">@book.Author</td>
+                    <td>@book.ReleaseDate?.ToString("dd/MM/yyyy")</td>
+                    <td>@book.Genre</td>
+                    <td class="text-cell" title="@book.Notes">@book.Notes</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@if (books is not null && books.Count == 0 && !loading)
+{
+    <p class="text-center text-muted">No books found.</p>
+}
+
+@* One single spinner: first load, search, load more, reload after a save *@
+@if (loading || books is null)
+{
+    <div class="text-center my-3">
+        <div class="spinner-border text-primary"></div>
+    </div>
+}
+
+@if (hasMore && !loading)
+{
+    <div class="text-center">
+        <button class="btn btn-outline-primary" @onclick="LoadMore">Load more</button>
+    </div>
+}
+
+@* Invisible marker for the automatic loading *@
+<div @ref="sentinel" style="height:1px"></div>
+
+@* ---------- Popup form (create / edit) ---------- *@
+@if (showForm)
+{
+    <div class="modal d-block" tabindex="-1" style="background: rgba(0,0,0,.5);">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+
+                <div class="modal-header">
+                    <h5 class="modal-title">@(form.Id == 0 ? "New book" : "Edit book")</h5>
+                    <button type="button" class="btn-close" @onclick="CloseForm"></button>
+                </div>
+
+                <EditForm Model="form" OnSubmit="Save">
+                    <div class="modal-body">
+
+                        @* Error messages returned by the API (one per line) *@
+                        @if (!string.IsNullOrEmpty(formError))
+                        {
+                            <div class="alert alert-danger" style="white-space: pre-line;">@formError</div>
+                        }
+
+                        <div class="mb-3">
+                            <label class="form-label">Title *</label>
+                            <InputText class="form-control" @bind-Value="form.Title" />
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Author</label>
+                            <InputText class="form-control" @bind-Value="form.Author" />
+                        </div>
+
+                        <div class="row mb-3">
+                            <div class="col">
+                                <label class="form-label">Genre *</label>
+                                <InputSelect class="form-select" @bind-Value="form.Genre">
+                                    <option value="">-- Select --</option>
+                                    @foreach (var g in Enum.GetValues<Genre>())
+                                    {
+                                        <option value="@g">@g</option>
+                                    }
+                                </InputSelect>
+                            </div>
+                            <div class="col">
+                                <label class="form-label">Status</label>
+                                @* On creation the status is always ToRead: the list is disabled *@
+                                <InputSelect class="form-select" @bind-Value="form.Status" disabled="@(form.Id == 0)">
+                                    @foreach (var s in Enum.GetValues<Status>())
+                                    {
+                                        <option value="@s">@s</option>
+                                    }
+                                </InputSelect>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Release date</label>
+                            <InputDate class="form-control" @bind-Value="form.ReleaseDate" />
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Notes</label>
+                            <InputTextArea class="form-control" rows="3" @bind-Value="form.Notes" />
+                        </div>
+
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" @onclick="CloseForm">Cancel</button>
+                        <button type="submit" class="btn btn-primary" disabled="@saving">
+                            @if (saving)
+                            {
+                                <span class="spinner-border spinner-border-sm"></span>
+                            }
+                            Save
+                        </button>
+                    </div>
+                </EditForm>
+
+            </div>
+        </div>
+    </div>
+}
+
+@* ---------- Delete confirmation popup ---------- *@
+@if (showDeleteConfirm)
+{
+    <div class="modal d-block" tabindex="-1" style="background: rgba(0,0,0,.5);">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Confirm deletion</h5>
+                    <button type="button" class="btn-close" @onclick="() => showDeleteConfirm = false"></button>
+                </div>
+                <div class="modal-body">
+                    Are you sure you want to delete @selectedIds.Count selected book(s)?
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" @onclick="() => showDeleteConfirm = false">Cancel</button>
+                    <button class="btn btn-danger" disabled="@deleting" @onclick="ConfirmDelete">
+                        @if (deleting)
+                        {
+                            <span class="spinner-border spinner-border-sm"></span>
+                        }
+                        Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private const int PageSize = 5;
+
+    private List<Book>? books;
+    private bool loading;
+    private bool hasMore;
+
+    // Search
+    private string search = "";
+    private CancellationTokenSource? debounce;
+
+    // Create / edit popup
+    private bool showForm;
+    private bool saving;
+    private Book form = new();
+    private string? formError;
+
+    // Messages
+    private string? message;
+    private string? errorMessage;
+
+    // Deletion
+    private HashSet<int> selectedIds = new();
+    private bool showDeleteConfirm;
+    private bool deleting;
+
+    // Automatic loading (infinite scroll)
+    private ElementReference sentinel;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<Home>? dotNetRef;
+    private bool needObserve;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadBooks();
+    }
+
+    // ----- Loading -----
+
+    // Reloads the table (keeps the same number of rows if more than 5 are displayed)
+    private async Task LoadBooks()
+    {
+        loading = true;
+        StateHasChanged();
+
+        try
+        {
+            int count = Math.Max(PageSize, books?.Count ?? 0);
+            var result = await Api.GetAsync(search, 0, count + 1);   // +1 to know if more rows exist
+            hasMore = result.Count > count;
+            books = result.Take(count).ToList();
+            needObserve = true;
+        }
+        finally
+        {
+            loading = false;   // the spinner always disappears, even if the API fails
+        }
+    }
+
+    private async Task LoadMore()
+    {
+        if (loading || !hasMore || books is null) return;
+
+        loading = true;
+        StateHasChanged();
+
+        try
+        {
+            var result = await Api.GetAsync(search, books.Count, PageSize + 1);
+            hasMore = result.Count > PageSize;
+            books.AddRange(result.Take(PageSize));
+            needObserve = true;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    // ----- Search with debounce -----
+
+    private async Task OnSearchInput(ChangeEventArgs e)
+    {
+        search = e.Value?.ToString() ?? "";
+
+        // Each keystroke cancels the previous timer and starts a new one
+        debounce?.Cancel();
+        debounce?.Dispose();
+        debounce = new CancellationTokenSource();
+        var token = debounce.Token;
+
+        try
+        {
+            await Task.Delay(400, token);   // wait 400 ms without typing
+            selectedIds.Clear();            // a new search resets the selection
+            books = null;                   // restart from the first 5 rows
+            await LoadBooks();              // the search is sent to the backend
+        }
+        catch (TaskCanceledException)
+        {
+            // the user typed again: this search is ignored
+        }
+    }
+
+    // ----- Popup: open / close / save -----
+
+    private void OpenCreate()
+    {
+        form = new Book { Status = Status.ToRead };
+        formError = null;
+        showForm = true;
+    }
+
+    private void OpenEdit(Book book)
+    {
+        // We edit a COPY: the table does not change before Save
+        form = new Book
+        {
+            Id = book.Id,
+            Title = book.Title,
+            Author = book.Author,
+            Genre = book.Genre,
+            Status = book.Status,
+            ReleaseDate = book.ReleaseDate,
+            Notes = book.Notes
+        };
+        formError = null;
+        showForm = true;
+    }
+
+    private void CloseForm() => showForm = false;
+
+    private async Task Save()
+    {
+        formError = null;
+        saving = true;
+        bool isNew = form.Id == 0;
+        string? error;
+
+        try
+        {
+            error = isNew
+                ? await Api.CreateAsync(form)
+                : await Api.UpdateAsync(form);
+        }
+        catch (HttpRequestException)
+        {
+            error = "Cannot reach the server. Please try again.";
+        }
+
+        saving = false;
+
+        if (error != null)
+        {
+            formError = error;   // the popup stays open with the red message
+            return;
+        }
+
+        showForm = false;
+        message = isNew ? "Book created successfully." : "Book updated successfully.";
+        _ = HideMessagesLater();
+        await LoadBooks();       // reload with the current search
+    }
+
+    // ----- Deletion -----
+
+    private void ToggleSelect(int id, bool isChecked)
+    {
+        if (isChecked) selectedIds.Add(id);
+        else selectedIds.Remove(id);
+    }
+
+    private void AskDelete()
+    {
+        errorMessage = null;
+        showDeleteConfirm = true;   // opens the confirmation popup
+    }
+
+    private async Task ConfirmDelete()
+    {
+        deleting = true;
+        string? error;
+
+        try
+        {
+            error = await Api.DeleteAsync(selectedIds.ToList());
+        }
+        catch (HttpRequestException)
+        {
+            error = "Cannot reach the server. Please try again.";
+        }
+
+        deleting = false;
+        showDeleteConfirm = false;
+
+        if (error != null)
+        {
+            errorMessage = error;   // e.g. "Cannot delete books with status 'Reading': ..."
+            _ = HideMessagesLater();
+            return;                 // nothing was deleted, the selection is kept
+        }
+
+        selectedIds.Clear();
+        message = "Book(s) deleted successfully.";
+        _ = HideMessagesLater();
+        await LoadBooks();
+    }
+
+    // Hides the success and error messages after 4 seconds
+    private async Task HideMessagesLater()
+    {
+        await Task.Delay(4000);
+        message = null;
+        errorMessage = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // ----- Automatic loading (bonus) -----
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./infiniteScroll.js");
+            dotNetRef = DotNetObjectReference.Create(this);
+        }
+
+        // (Re)start watching the marker after each load
+        if (needObserve && module is not null && hasMore)
+        {
+            needObserve = false;
+            await module.InvokeVoidAsync("observe", sentinel, dotNetRef);
+        }
+    }
+
+    // Called by JavaScript when the marker becomes visible
+    [JSInvokable]
+    public async Task OnReachedBottom()
+    {
+        await InvokeAsync(async () =>
+        {
+            await LoadMore();
+            StateHasChanged();
+        });
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (module is not null)
+            {
+                await module.InvokeVoidAsync("disconnect");
+                await module.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException) { }
+
+        dotNetRef?.Dispose();
+    }
+}
